@@ -21,6 +21,7 @@ from tqdm.auto import tqdm
 from tokenizer import BaseTokenizer
 from utils import load_dataset, collate_fn
 from model.transformer import Seq2SeqTransformer
+from model.rnn import Seq2SeqRNN
 
 
 def parse_args() -> argparse.Namespace:
@@ -133,17 +134,39 @@ def main() -> None:
     )
 
     # ---------------- Model ----------------
-    model = Seq2SeqTransformer(
-        num_encoder_layers=cfg["model"]["enc_layers"],
-        num_decoder_layers=cfg["model"]["dec_layers"],
-        emb_size=cfg["model"]["emb_size"],
-        nhead=cfg["model"]["nhead"],
-        src_vocab_size=tokenizer.src_vocab_size,
-        tgt_vocab_size=tokenizer.tgt_vocab_size,
-        dim_feedforward=cfg["model"]["ffn_dim"],
-        dropout=cfg["model"].get("dropout", 0.1),
-        pad_id=tokenizer.pad_token_id,
-    ).to(device)
+    model_type = cfg.get("model_type", "transformer").lower()
+    
+    if model_type == "transformer":
+        # 创建 Transformer 模型
+        model = Seq2SeqTransformer(
+            num_encoder_layers=cfg["model"]["enc_layers"],
+            num_decoder_layers=cfg["model"]["dec_layers"],
+            emb_size=cfg["model"]["emb_size"],
+            nhead=cfg["model"]["nhead"],
+            src_vocab_size=tokenizer.src_vocab_size,
+            tgt_vocab_size=tokenizer.tgt_vocab_size,
+            dim_feedforward=cfg["model"]["ffn_dim"],
+            dropout=cfg["model"].get("dropout", 0.1),
+            pad_id=tokenizer.pad_token_id,
+        ).to(device)
+        print(f"使用 Transformer 模型")
+    elif model_type == "rnn":
+        # 创建 RNN 模型
+        model = Seq2SeqRNN(
+            num_encoder_layers=cfg["model"]["enc_layers"],
+            num_decoder_layers=cfg["model"]["dec_layers"],
+            emb_size=cfg["model"]["emb_size"],
+            hidden_size=cfg["model"].get("hidden_size", cfg["model"]["emb_size"]),
+            src_vocab_size=tokenizer.src_vocab_size,
+            tgt_vocab_size=tokenizer.tgt_vocab_size,
+            dropout=cfg["model"].get("dropout", 0.1),
+            rnn_type=cfg["model"].get("rnn_type", "gru"),
+            attention_method=cfg["model"].get("attention_method", "dot"),
+            pad_id=tokenizer.pad_token_id,
+        ).to(device)
+        print(f"使用 RNN 模型 (类型: {cfg['model'].get('rnn_type', 'gru')}, 注意力: {cfg['model'].get('attention_method', 'dot')})")
+    else:
+        raise ValueError(f"不支持的模型类型: {model_type}，请使用 'transformer' 或 'rnn'")
 
     # ---------------- Optimizer / Scheduler / Loss ----------------
     optimizer = optim.AdamW(
@@ -198,6 +221,7 @@ def main() -> None:
         torch.save(
             {
                 "model_state_dict": model.state_dict(),
+                "model_type": model_type,  # 保存模型类型以便加载时使用
                 "tokenizer_state": {
                     "src_vocab": tokenizer.src_vocab,
                     "tgt_vocab": tokenizer.tgt_vocab,

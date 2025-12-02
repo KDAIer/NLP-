@@ -1,14 +1,24 @@
 # ------------- 分词器 -----------------
 tokenizer: tokenizer.JiebaEnTokenizer     # 可改为自定义类的全路径
 
+# ------------- 模型选择 ----------------
+# 可选: "transformer" 或 "rnn"
+model_type: transformer
+
 # ------------- 模型结构 ----------------
 model:
+  # === Transformer 专用参数 ===
   enc_layers: 4          # Transformer Encoder 层数
   dec_layers: 4          # Transformer Decoder 层数
   emb_size: 1024          # 词向量 / 隐层维度
   nhead: 64               # Multi-Head Attention 头数
   ffn_dim: 1024           # Feed-Forward 隐层
   dropout: 0.1           # Dropout 概率
+  
+  # === RNN 专用参数 ===
+  rnn_type: gru          # RNN 类型: "gru" 或 "lstm"
+  hidden_size: 512       # RNN 隐藏层维度
+  attention_method: dot  # 注意力方法: "dot", "multiplicative", "additive"
 
 # ------------- 训练超参 ----------------
 train:

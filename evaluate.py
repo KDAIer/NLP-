@@ -20,8 +20,9 @@ from tqdm.auto import tqdm
 import yaml
 
 from tokenizer import BaseTokenizer
-from utils import load_dataset, collate_fn, translate_sentence
+from utils import load_dataset, collate_fn, translate_sentence, translate_sentence_rnn
 from model.transformer import Seq2SeqTransformer
+from model.rnn import Seq2SeqRNN
 
 
 # --------------------------------------------------------------------------- #
@@ -54,6 +55,7 @@ def evaluate_and_collect(
     tok: BaseTokenizer,
     device: torch.device,
     param_bytes: bytes,
+    model_type: str = "transformer",
 ) -> Tuple[float, List[Dict[str, str]]]:
     model.eval()
     records: List[Dict[str, str]] = []
@@ -76,9 +78,17 @@ def evaluate_and_collect(
                 for id in tgt_row[1:-1]
                 if id.item() not in (tok.pad_token_id, tok.eos_token_id)
             )
-            hyp_en = translate_sentence(
-                zh_sent, model, tok, device=device, max_len=100
-            )
+            
+            # 根据模型类型选择翻译函数
+            if model_type == "rnn":
+                hyp_en = translate_sentence_rnn(
+                    zh_sent, model, tok, device=device, max_len=100
+                )
+            else:
+                hyp_en = translate_sentence(
+                    zh_sent, model, tok, device=device, max_len=100
+                )
+            
             sha = hashlib.sha256(param_bytes + hyp_en.encode()).hexdigest()
             records.append(
                 {"src": zh_sent, "ref": ref_en, "hyp": hyp_en, "hyp_id": sha}
@@ -114,17 +124,40 @@ def main() -> None:
     # ---------------- 模型 ---------------------------
     ckpt = torch.load(args.ckpt, map_location=device)
     mcfg = cfg["model"]
-    model = Seq2SeqTransformer(
-        num_encoder_layers=mcfg["enc_layers"],
-        num_decoder_layers=mcfg["dec_layers"],
-        emb_size=mcfg["emb_size"],
-        nhead=mcfg["nhead"],
-        src_vocab_size=tok.src_vocab_size,
-        tgt_vocab_size=tok.tgt_vocab_size,
-        dim_feedforward=mcfg["ffn_dim"],
-        dropout=mcfg.get("dropout", 0.1),
-        pad_id=tok.pad_token_id,
-    ).to(device)
+    
+    # 从 checkpoint 或 config 中获取模型类型
+    model_type = ckpt.get("model_type", cfg.get("model_type", "transformer")).lower()
+    
+    if model_type == "transformer":
+        model = Seq2SeqTransformer(
+            num_encoder_layers=mcfg["enc_layers"],
+            num_decoder_layers=mcfg["dec_layers"],
+            emb_size=mcfg["emb_size"],
+            nhead=mcfg["nhead"],
+            src_vocab_size=tok.src_vocab_size,
+            tgt_vocab_size=tok.tgt_vocab_size,
+            dim_feedforward=mcfg["ffn_dim"],
+            dropout=mcfg.get("dropout", 0.1),
+            pad_id=tok.pad_token_id,
+        ).to(device)
+        print(f"加载 Transformer 模型")
+    elif model_type == "rnn":
+        model = Seq2SeqRNN(
+            num_encoder_layers=mcfg["enc_layers"],
+            num_decoder_layers=mcfg["dec_layers"],
+            emb_size=mcfg["emb_size"],
+            hidden_size=mcfg.get("hidden_size", mcfg["emb_size"]),
+            src_vocab_size=tok.src_vocab_size,
+            tgt_vocab_size=tok.tgt_vocab_size,
+            dropout=mcfg.get("dropout", 0.1),
+            rnn_type=mcfg.get("rnn_type", "gru"),
+            attention_method=mcfg.get("attention_method", "dot"),
+            pad_id=tok.pad_token_id,
+        ).to(device)
+        print(f"加载 RNN 模型 (类型: {mcfg.get('rnn_type', 'gru')}, 注意力: {mcfg.get('attention_method', 'dot')})")
+    else:
+        raise ValueError(f"不支持的模型类型: {model_type}")
+    
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 
@@ -136,7 +169,7 @@ def main() -> None:
         param_bytes = next(model.parameters()).detach().cpu().numpy().tobytes()
 
     # ---------------- 评测 ---------------------------
-    bleu, records = evaluate_and_collect(model, loader, tok, device, param_bytes)
+    bleu, records = evaluate_and_collect(model, loader, tok, device, param_bytes, model_type)
     print(f"\n  Corpus BLEU: {bleu:.2f}")
 
     # ---------------- 保存 JSON ----------------------

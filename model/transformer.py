@@ -32,10 +32,23 @@ class PositionalEncoding(nn.Module):
         # ------------------------------------------------------------------
 
         super().__init__()
+        # 创建形状为 (max_len, d_model) 的零张量
         pe = torch.zeros(max_len, d_model)
+        # 位置索引 (max_len, 1)
         position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)
-        # TODO: 计算位置编码
-
+        
+        # 计算位置编码的分母部分: 10000^(2i/d_model)
+        # 使用 exp(log) 技巧避免数值溢出: 10000^(2i/d_model) = exp(2i * log(10000) / d_model)
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2, dtype=torch.float32) * (-math.log(10000.0) / d_model)
+        )
+        
+        # 偶数维度使用 sin，奇数维度使用 cos
+        pe[:, 0::2] = torch.sin(position * div_term)  # 偶数索引位置
+        pe[:, 1::2] = torch.cos(position * div_term)  # 奇数索引位置
+        
+        # 增加 batch 维度，形状变为 (1, max_len, d_model)
+        pe = pe.unsqueeze(0)
 
         # End of the TODO
         # Register as buffer so it moves with .to(device) but isn't a parameter
@@ -53,7 +66,11 @@ class PositionalEncoding(nn.Module):
         # ------------------------------------------------------------------
         # TODO (学生实现)：完成前向传播。
         # ------------------------------------------------------------------
-        pass
+        # 获取序列长度
+        seq_len = x.size(1)
+        # 将位置编码截取到当前序列长度并加到输入上
+        # pe 形状为 (1, max_len, d_model)，截取前 seq_len 个位置
+        return x + self.pe[:, :seq_len, :]
 
 
 # -----------------------------------------------------------------------------
@@ -84,8 +101,19 @@ class MultiHeadAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = d_model // num_heads
 
-        # TODO: 定义线性层等
-        pass
+        # Q、K、V 的线性变换层（无偏置，与原论文一致）
+        self.q_linear = nn.Linear(d_model, d_model, bias=False)
+        self.k_linear = nn.Linear(d_model, d_model, bias=False)
+        self.v_linear = nn.Linear(d_model, d_model, bias=False)
+        
+        # 输出投影层
+        self.out_proj = nn.Linear(d_model, d_model, bias=False)
+        
+        # Dropout 层，用于注意力权重
+        self.dropout = nn.Dropout(dropout)
+        
+        # 缩放因子，用于 Scaled Dot-Product Attention
+        self.scale = math.sqrt(self.head_dim)
 
 
     def forward(
@@ -114,7 +142,45 @@ class MultiHeadAttention(nn.Module):
         #   3. 聚合 V，最后经 ``out_proj`` 投影回原维度
         # ------------------------------------------------------------------
         
-        pass
+        batch_size = query.size(0)
+        
+        # 步骤1: 线性映射并分割成多头
+        # Q/K/V 线性变换: (B, L, D) -> (B, L, D)
+        Q = self.q_linear(query)
+        K = self.k_linear(key)
+        V = self.v_linear(value)
+        
+        # 重塑为多头形式: (B, L, D) -> (B, L, H, head_dim) -> (B, H, L, head_dim)
+        Q = Q.view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
+        K = K.view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
+        V = V.view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
+        
+        # 步骤2: 计算 Scaled Dot-Product Attention
+        # 注意力得分: (B, H, L_q, head_dim) @ (B, H, head_dim, L_k) -> (B, H, L_q, L_k)
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / self.scale
+        
+        # 应用掩码（mask 为 True/1 表示可见，False/0 表示遮挡）
+        if mask is not None:
+            # 将遮挡位置的得分设为负无穷，softmax 后接近 0
+            scores = scores.masked_fill(mask == 0, float('-inf'))
+        
+        # Softmax 归一化得到注意力权重
+        attn_weights = torch.softmax(scores, dim=-1)
+        
+        # 对注意力权重应用 dropout
+        attn_weights = self.dropout(attn_weights)
+        
+        # 步骤3: 用注意力权重聚合 V
+        # (B, H, L_q, L_k) @ (B, H, L_k, head_dim) -> (B, H, L_q, head_dim)
+        attn_output = torch.matmul(attn_weights, V)
+        
+        # 合并多头: (B, H, L_q, head_dim) -> (B, L_q, H, head_dim) -> (B, L_q, D)
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, -1, self.d_model)
+        
+        # 输出投影
+        output = self.out_proj(attn_output)
+        
+        return output
 
 
 # -----------------------------------------------------------------------------
@@ -166,7 +232,23 @@ class EncoderLayer(nn.Module):
         # TODO (学生实现)：按顺序实现 (1) 自注意力 + 残差 + LN → (2) FFN + 残差 + LN
         # ------------------------------------------------------------------
 
-        pass
+        # (1) 自注意力 + 残差连接 + 层归一化
+        # 计算自注意力（Q=K=V=x）
+        attn_output = self.self_attn(x, x, x, src_mask)
+        # 残差连接 + Dropout
+        x = x + self.dropout(attn_output)
+        # 层归一化
+        x = self.norm1(x)
+        
+        # (2) 前馈网络 + 残差连接 + 层归一化
+        # 计算前馈网络输出
+        ffn_output = self.ffn(x)
+        # 残差连接 + Dropout
+        x = x + self.dropout(ffn_output)
+        # 层归一化
+        x = self.norm2(x)
+        
+        return x
 
 
 class DecoderLayer(nn.Module):
@@ -204,7 +286,24 @@ class DecoderLayer(nn.Module):
         # 每步均需加残差及层归一化。
         # ------------------------------------------------------------------
 
-        pass
+        # (1) 掩码自注意力（Masked Self-Attention）+ 残差 + LN
+        # 使用 tgt_mask 防止看到未来的 token
+        self_attn_output = self.self_attn(x, x, x, tgt_mask)
+        x = x + self.dropout(self_attn_output)
+        x = self.norm1(x)
+        
+        # (2) 编解码注意力（Cross-Attention）+ 残差 + LN
+        # Q 来自 Decoder，K/V 来自 Encoder 的 memory
+        cross_attn_output = self.cross_attn(x, memory, memory, src_mask)
+        x = x + self.dropout(cross_attn_output)
+        x = self.norm2(x)
+        
+        # (3) 前馈网络（FFN）+ 残差 + LN
+        ffn_output = self.ffn(x)
+        x = x + self.dropout(ffn_output)
+        x = self.norm3(x)
+        
+        return x
 
 # -----------------------------------------------------------------------------
 # Encoder & Decoder stacks

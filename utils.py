@@ -2,7 +2,8 @@
 通用工具：
 1. TranslationDataset + 自定义 collate_fn
 2. load_dataset：加载 processed 数据集并注入词表
-3. translate_sentence：评估 / demo 用的贪婪解码
+3. translate_sentence：评估 / demo 用的贪婪解码（Transformer）
+4. translate_sentence_rnn：RNN 模型的贪婪解码
 """
 from __future__ import annotations
 import json
@@ -140,3 +141,72 @@ def translate_sentence(
 
     pred_ids = ys.squeeze(0).tolist()  # 去掉 batch 维
     return tokenizer.decode_tgt(pred_ids)
+
+
+# ---------------------------------------------------------------------------
+# 4. translate_sentence_rnn —— RNN 模型推理
+# ---------------------------------------------------------------------------
+def translate_sentence_rnn(
+    sentence_zh: str,
+    model,
+    tokenizer: BaseTokenizer,
+    device: torch.device | str = "cpu",
+    max_len: int = 100,
+) -> str:
+    """
+    RNN 模型的贪婪解码翻译函数
+    输入:
+        sentence_zh   中文原句
+        model         已训练的 Seq2SeqRNN
+        tokenizer     同一 tokenizer 实例
+    输出:
+        翻译后的英文句子
+    """
+    model.eval()
+    
+    # 编码源句子
+    src_ids = torch.tensor(
+        tokenizer.encode_src(sentence_zh),
+        dtype=torch.long,
+        device=device
+    ).unsqueeze(0)  # (1, L_src)
+    
+    # 创建源序列 mask
+    src_mask = model._make_src_mask(src_ids)
+    
+    with torch.no_grad():
+        # 编码
+        encoder_outputs, hidden = model.encode(src_ids)
+        
+        # 初始化解码器输入
+        tgt_token = torch.tensor(
+            [[tokenizer.sos_token_id]],
+            dtype=torch.long,
+            device=device
+        )  # (1, 1)
+        
+        # 初始化上下文向量（全零）
+        context = torch.zeros(1, model.hidden_size, device=device)
+        
+        # 收集生成的 token
+        generated_ids = [tokenizer.sos_token_id]
+        
+        for _ in range(max_len):
+            # 单步解码
+            output, hidden, context, _ = model.decoder.forward_step(
+                tgt_token, hidden, encoder_outputs, context, src_mask
+            )
+            
+            # 贪婪选择最大概率的 token
+            next_id = output.argmax(dim=-1).item()
+            generated_ids.append(next_id)
+            
+            # 检查是否生成结束符
+            if next_id == tokenizer.eos_token_id:
+                break
+            
+            # 更新输入 token
+            tgt_token = torch.tensor([[next_id]], dtype=torch.long, device=device)
+    
+    # 解码生成的 token 序列
+    return tokenizer.decode_tgt(generated_ids)
